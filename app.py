@@ -2,14 +2,20 @@ import tempfile
 from pathlib import Path
 
 import gradio as gr
+from transformers import AutoModel
 from yue2 import YuE2Pipeline
 
 
 MODEL_ID = "m-a-p/YuE2-3B"
+TRANSCRIBER_ID = "m-a-p/SheetSage2"
 
 # ZeroGPU emulates CUDA during startup and attaches a real GPU for decorated calls.
 # Keeping the pipeline here also ensures that model weights are downloaded once.
 pipe = YuE2Pipeline.from_pretrained(MODEL_ID, device="cuda", progress=False)
+transcriber = AutoModel.from_pretrained(
+    TRANSCRIBER_ID,
+    trust_remote_code=True,
+).eval().to("cuda")
 
 
 def estimate_duration(style, lyrics, planning_mode, seed):
@@ -38,6 +44,19 @@ def save_result(song, prefix):
     song.save(audio_path)
     score = song.abc or "No symbolic score was produced in direct-generation mode."
     return str(audio_path), score
+
+
+def transcribe_melody(audio_path):
+    if not audio_path:
+        raise gr.Error("Upload a source song first.")
+    try:
+        result = transcriber.transcribe(audio_path, melody_only=True)
+    except Exception as exc:
+        raise gr.Error(f"Transcription failed: {exc}") from exc
+    abc_score = result.get("abc")
+    if not abc_score:
+        raise gr.Error("SheetSage2 did not produce an ABC score for this audio.")
+    return abc_score, "Melody transcription ready. Review it below, then generate the cover."
 
 
 def generate_song(style, lyrics, planning_mode, seed):
@@ -136,12 +155,19 @@ with gr.Blocks(title="YuE2-3B Music Generator") as demo:
 
         with gr.Tab("Cover"):
             gr.Markdown(
-                "Rearrange a song from its melody score. Transcribe the source recording with "
-                "[SheetSage2](https://huggingface.co/m-a-p/SheetSage2), remove chord symbols, "
-                "and paste the melody ABC below. Use lyrics whose sections match the recording."
+                "Upload a source song and transcribe its melody with "
+                "[SheetSage2](https://huggingface.co/m-a-p/SheetSage2), then review the editable "
+                "ABC score and render it in a new style. Use lyrics whose sections match the recording."
             )
             with gr.Row():
                 with gr.Column(scale=3):
+                    source_audio = gr.Audio(
+                        label="Source song",
+                        type="filepath",
+                        sources=["upload"],
+                    )
+                    transcribe_button = gr.Button("1. Transcribe melody")
+                    transcription_status = gr.Markdown()
                     cover_style = gr.Textbox(
                         label="New style",
                         placeholder="Jazz-funk, warm lead vocal, Rhodes piano, tight drums…",
@@ -152,12 +178,12 @@ with gr.Blocks(title="YuE2-3B Music Generator") as demo:
                         placeholder="[Verse]\nLyrics aligned with the source song…",
                     )
                     cover_abc = gr.Textbox(
-                        label="Melody ABC (without chord symbols)",
+                        label="Melody ABC (review or edit before generation)",
                         lines=12,
                         placeholder="X:1\nT:Source melody\nM:4/4\nL:1/8\nK:C\n…",
                     )
                     cover_seed = gr.Number(value=831001, precision=0, label="Seed")
-                    cover_button = gr.Button("Generate cover", variant="primary")
+                    cover_button = gr.Button("2. Generate cover", variant="primary")
                 with gr.Column(scale=2):
                     cover_audio = gr.Audio(label="Generated cover", type="filepath")
                     with gr.Accordion("Used ABC score", open=False):
@@ -177,6 +203,11 @@ with gr.Blocks(title="YuE2-3B Music Generator") as demo:
         fn=generate_cover,
         inputs=[cover_style, cover_lyrics, cover_abc, cover_seed],
         outputs=[cover_audio, cover_score],
+    )
+    transcribe_button.click(
+        fn=transcribe_melody,
+        inputs=[source_audio],
+        outputs=[cover_abc, transcription_status],
     )
 
 
